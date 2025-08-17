@@ -1,0 +1,52 @@
+{
+    "name": "OnChainArbitrageAgent",
+    "description": "Autonomous on-chain futures arbitrage agent exploiting funding rate disparities across exchanges.",
+    "plugins": [
+      "@elizaos/plugin-evm",
+      "@elizaos/plugin-solana",
+      "@elizaos/plugin-browser"
+    ],
+    "clients": ["direct"],
+    "modelProvider": "openai",
+    "settings": {
+      "chains": {
+        "evm": ["optimism", "arbitrum", "polygon"],
+        "solana": ["mainnet-beta"]
+      },
+      "secrets": {
+        "EVM_PRIVATE_KEY": "${EVM_PRIVATE_KEY}",
+        "SOLANA_PRIVATE_KEY": "${SOLANA_PRIVATE_KEY}",
+        "DYDX_API_KEY": "${DYDX_API_KEY}",
+        "DYDX_API_SECRET": "${DYDX_API_SECRET}",
+        "BIRDEYE_API_KEY": "${BIRDEYE_API_KEY}"
+      },
+      "parameters": {
+        "minProfitThreshold": 0.0001,
+        "maxLeverage": 5,
+        "maxPositionNotional": 10000,
+        "checkIntervalSeconds": 60
+      }
+    },
+    "system": "You are an autonomous trading agent focused on arbitrage in on-chain futures markets. Only take trades with positive net profit after fees/slippage, always hedge risk.",
+    "lore": [
+      "Funding rate arbitrage involves going long on one exchange and short on another.",
+      "Market skew and liquidity affect future funding rates.",
+      "Only execute trades when net return after fees is positive.",
+      "Machine learning predictions can adjust leverage and position sizing."
+    ],
+    "actions": [
+      { "name": "FETCH_MARKET_DATA", "function": "fetchMarketData", "outputs": ["marketData"] },
+      { "name": "CALC_ARBITRAGE_OPPORTUNITY", "function": "analyzeOpportunities", "inputs": ["marketData"], "outputs": ["tradePlan"] },
+      { "name": "EXECUTE_TRADE_PLAN", "function": "executeTrades", "inputs": ["tradePlan"], "outputs": ["executionResult"] },
+      { "name": "MONITOR_POSITIONS", "function": "monitorAndClose", "inputs": ["executionResult"] }
+    ],
+    "services": [
+      {
+        "name": "ArbitrageLooper",
+        "trigger": "interval",
+        "interval": 60,
+        "sequence": ["FETCH_MARKET_DATA", "CALC_ARBITRAGE_OPPORTUNITY", "EXECUTE_TRADE_PLAN", "MONITOR_POSITIONS"]
+      }
+    ]
+  }
+  

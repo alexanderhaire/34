@@ -1,3 +1,4 @@
+// src/plugins/degenIntel/tasks.ts
 import { type IAgentRuntime, type UUID, logger } from '@elizaos/core';
 
 import Birdeye from './tasks/birdeye';
@@ -7,293 +8,318 @@ import Twitter from './tasks/twitter';
 import TwitterParser from './tasks/twitterParser';
 import type { Sentiment } from './types';
 
-// let's not make it a dependency
-//import type { ITradeService } from '../../degenTrader/types';
+/* ----------------------------- helpers ---------------------------------- */
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Wait until @elizaos/plugin-sql has attached the task adapter.
+ * The adapter lives at runtime.adapter and exposes getTasks/createTask/etc.
+ */
+async function waitForTaskAdapter(
+  runtime: IAgentRuntime,
+  opts?: { tries?: number; delayMs?: number }
+) {
+  const tries = opts?.tries ?? 100;  // up to ~10s
+  const delay = opts?.delayMs ?? 100;
+  for (let i = 0; i < tries; i++) {
+    const adapter = (runtime as any)?.adapter;
+    if (adapter && typeof adapter.getTasks === 'function' && typeof adapter.createTask === 'function') {
+      return;
+    }
+    await sleep(delay);
+  }
+  throw new Error('Task adapter not ready (is @elizaos/plugin-sql loaded?)');
+}
+
+/**
+ * Ensure an agent row exists in the DB so task.agent_id FK passes.
+ * If the adapter doesn’t expose getAgent/createAgent we just skip (best-effort).
+ */
+async function ensureAgentRow(runtime: IAgentRuntime): Promise<boolean> {
+  const adapter: any = (runtime as any)?.adapter;
+  if (!adapter) return false;
+
+  const hasGet = typeof adapter.getAgent === 'function';
+  const hasCreate = typeof adapter.createAgent === 'function';
+  if (!hasGet || !hasCreate) return true; // nothing we can do; proceed
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      const existing = await adapter.getAgent(runtime.agentId);
+      if (existing) return true;
+
+      await adapter.createAgent({
+        id: runtime.agentId,
+        name: runtime.character?.name ?? 'Agent',
+      });
+      return true;
+    } catch (err) {
+      logger.warn(`[intel] ensureAgentRow attempt ${i + 1} failed; retrying...`, err);
+      await sleep(500 * (i + 1));
+    }
+  }
+  return false;
+}
+
+/**
+ * Create a task with retries and FK guard.
+ * If we hit the 23503 agent FK error, we’ll try to create the agent row once and retry.
+ */
+async function createTaskSafely(
+  runtime: IAgentRuntime,
+  task: {
+    name: string;
+    description: string;
+    worldId: UUID;
+    tags: string[];
+    metadata?: Record<string, any>;
+  }
+) {
+  const meta = task.metadata ?? {
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    updateInterval: 1000 * 60 * 5,
+  };
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      await runtime.createTask({
+        name: task.name,
+        description: task.description,
+        worldId: task.worldId,
+        metadata: meta,
+        tags: task.tags,
+      });
+      return; // success
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      // FK error from drizzle/pg: code 23503
+      const isAgentFk =
+        msg.includes('23503') ||
+        msg.includes('tasks_agent_id_fkey') ||
+        msg.includes('is not present in table "agents"');
+
+      if (isAgentFk) {
+        logger.warn('[intel] createTask FK failed; ensuring agent row then retrying once...', e);
+        const ok = await ensureAgentRow(runtime);
+        if (!ok) {
+          logger.error('[intel] could not ensure agent row; aborting task creation');
+          return;
+        }
+        // fall through to next retry
+      } else {
+        logger.warn(`[intel] createTask attempt ${i + 1} failed; retrying...`, e);
+      }
+      await sleep(500 * (i + 1));
+    }
+  }
+  logger.error(`[intel] createTask ultimately failed for ${task.name}`);
+}
+
+/* --------------------------- main registrar ------------------------------ */
 
 /**
  * Registers tasks for the agent to perform various Intel-related actions.
- * * @param { IAgentRuntime } runtime - The agent runtime object.
- * @param { UUID } [worldId] - The optional world ID to associate with the tasks.
- * @returns {Promise<void>} - A promise that resolves once tasks are registered.
+ * Safe against racing DB init, missing agent row, and missing services.
  */
 export const registerTasks = async (runtime: IAgentRuntime, worldId?: UUID) => {
-  worldId = runtime.agentId; // this is global data for the agent
-
-  // first, get all tasks with tags "queue", "repeat", "degen_intel" and delete them
-  const tasks = await runtime.getTasks({
-    tags: ['queue', 'repeat', 'degen_intel'],
-  });
-
-  for (const task of tasks) {
-    await runtime.deleteTask(task.id);
+  try {
+    await waitForTaskAdapter(runtime);
+  } catch (err) {
+    logger.error('[intel] task adapter never became ready; skipping task registration', err);
+    return;
   }
 
-  /*
-  if (runtime.getSetting('BIRDEYE_API_KEY')) {
-    runtime.registerTaskWorker({
-      name: 'INTEL_BIRDEYE_SYNC_TRENDING',
-      validate: async (_runtime, _message, _state) => {
-        return true; // TODO: validate after certain time
-      },
-      execute: async (runtime, _options, task) => {
-        const birdeye = new Birdeye(runtime);
-        try {
-          await birdeye.syncTrendingTokens('solana');
-          //await birdeye.syncTrendingTokens('base');
-        } catch (error) {
-          logger.error('Failed to sync trending tokens', error);
-          // kill this task
-          runtime.deleteTask(task.id);
-        }
-      },
-    });
+  worldId = runtime.agentId; // global scope for this agent
 
-    runtime.createTask({
-      name: 'INTEL_BIRDEYE_SYNC_TRENDING',
-      description: 'Sync trending tokens from Birdeye',
-      worldId,
-      metadata: {
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        updateInterval: 1000 * 60 * 60, // 1 hour
-      },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
-    });
-  } else {
-    logger.debug(
-      'WARNING: BIRDEYE_API_KEY not found, skipping creation of INTEL_BIRDEYE_SYNC_TRENDING task'
-    );
+  // Make sure the agent exists so task.agent_id FK won’t fail
+  const agentOk = await ensureAgentRow(runtime);
+  if (!agentOk) {
+    logger.error('[intel] Could not ensure agent row; skipping task registration');
+    return;
   }
 
-  if (runtime.getSetting('COINMARKETCAP_API_KEY')) {
-    runtime.registerTaskWorker({
-      name: 'INTEL_COINMARKETCAP_SYNC',
-      validate: async (_runtime, _message, _state) => {
-        return true; // TODO: validate after certain time
-      },
-      execute: async (runtime, _options, task) => {
-        const cmc = new CoinmarketCap(runtime);
-        try {
-          await cmc.syncTokens();
-        } catch (error) {
-          logger.debug('Failed to sync tokens', error);
-          // kill this task
-          //await runtime.deleteTask(task.id);
-        }
-      },
-    });
-
-    runtime.createTask({
-      name: 'INTEL_COINMARKETCAP_SYNC',
-      description: 'Sync tokens from Coinmarketcap',
-      worldId,
-      metadata: {
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        updateInterval: 1000 * 60 * 5, // 5 minutes
-      },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
-    });
-  } else {
-    logger.debug(
-      'WARNING: COINMARKETCAP_API_KEY not found, skipping creation of INTEL_COINMARKETCAP_SYNC task'
-    );
+  // Clean existing intel tasks (best-effort; don’t crash if this fails)
+  try {
+    const old = await runtime.getTasks({ tags: ['queue', 'repeat', 'degen_intel'] });
+    for (const t of old) {
+      try {
+        await runtime.deleteTask(t.id);
+      } catch (e) {
+        logger.warn(`[intel] failed to delete task ${t.id}`, e);
+      }
+    }
+  } catch (e) {
+    logger.warn('[intel] getTasks/deleteTask failed; continuing without cleanup', e);
   }
-  */
 
-  // shouldn't plugin-solana and plugin-evm handle this?
+  /* ---------------------- INTEL_SYNC_WALLET (Birdeye) ---------------------- */
+
   runtime.registerTaskWorker({
     name: 'INTEL_SYNC_WALLET',
-    validate: async (_runtime, _message, _state) => {
-      return true; // TODO: validate after certain time
-    },
-    execute: async (runtime, _options, task) => {
-      const birdeye = new Birdeye(runtime);
+    validate: async () => true, // add cadence constraints if desired
+    execute: async (rt) => {
+      const birdeye = new Birdeye(rt);
       try {
         await birdeye.syncWallet();
-      } catch (error) {
-        logger.error('Failed to sync wallet', error);
-        // kill this task
-        //await runtime.deleteTask(task.id);
+      } catch (err) {
+        logger.error('Failed to sync wallet', err);
       }
     },
   });
 
-  runtime.createTask({
+  await createTaskSafely(runtime, {
     name: 'INTEL_SYNC_WALLET',
     description: 'Sync wallet from Birdeye',
     worldId,
+    tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
     metadata: {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       updateInterval: 1000 * 60 * 5, // 5 minutes
     },
-    tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
   });
 
-  // Only create the Twitter sync task if the Twitter service exists
-  const plugins = runtime.plugins.map((p) => p.name);
-  //const twitterService = runtime.getService('twitter');
-  if (plugins.indexOf('twitter') !== -1) {
+  /* ----------------------------- Twitter tasks ----------------------------- */
+
+  const pluginNames = runtime.plugins.map((p) => p.name);
+  const hasTwitterPlugin = pluginNames.includes('twitter');
+
+  if (hasTwitterPlugin) {
+    // Raw tweet sync
     runtime.registerTaskWorker({
       name: 'INTEL_SYNC_RAW_TWEETS',
-      validate: async (runtime, _message, _state) => {
-        // Check if Twitter service exists and return false if it doesn't
-        const twitterService = runtime.getService('twitter');
+      validate: async (rt) => {
+        const twitterService = rt.getService('twitter');
         if (!twitterService) {
-          // Log only once when we'll be removing the task
           logger.debug('Twitter service not available, removing INTEL_SYNC_RAW_TWEETS task');
-
-          // Get all tasks of this type
-          const tasks = await runtime.getTasksByName('INTEL_SYNC_RAW_TWEETS');
-
-          // Delete all these tasks
-          for (const task of tasks) {
-            await runtime.deleteTask(task.id);
+          try {
+            const tasks = await rt.getTasksByName('INTEL_SYNC_RAW_TWEETS');
+            for (const t of tasks) await rt.deleteTask(t.id);
+          } catch (e) {
+            logger.warn('[intel] failed to prune INTEL_SYNC_RAW_TWEETS tasks', e);
           }
-
           return false;
         }
         return true;
       },
-      execute: async (runtime, _options, task) => {
+      execute: async (rt) => {
         try {
-          const twitter = new Twitter(runtime);
+          const twitter = new Twitter(rt);
           await twitter.syncRawTweets();
-        } catch (error) {
-          logger.error('Failed to sync raw tweets', error);
+        } catch (err) {
+          logger.error('Failed to sync raw tweets', err);
         }
       },
     });
 
-    runtime.createTask({
+    await createTaskSafely(runtime, {
       name: 'INTEL_SYNC_RAW_TWEETS',
       description: 'Sync raw tweets from Twitter',
       worldId,
+      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
       metadata: {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         updateInterval: 1000 * 60 * 15, // 15 minutes
       },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
     });
 
+    // Tweet parsing
     runtime.registerTaskWorker({
       name: 'INTEL_PARSE_TWEETS',
-      validate: async (runtime, _message, _state) => {
-        // Check if Twitter service exists and return false if it doesn't
-        const twitterService = runtime.getService('twitter');
-        if (!twitterService) {
-          // The main task handler above will take care of removing all Twitter tasks
-          return false; // This will prevent execution
-        }
-        return true;
-      },
-      execute: async (runtime, _options, task) => {
-        const twitterParser = new TwitterParser(runtime);
+      validate: async (rt) => !!rt.getService('twitter'),
+      execute: async (rt) => {
+        const twitterParser = new TwitterParser(rt);
         try {
           await twitterParser.parseTweets();
-        } catch (error) {
-          logger.error('Failed to parse tweets', error);
+        } catch (err) {
+          logger.error('Failed to parse tweets', err);
         }
       },
     });
 
-    runtime.createTask({
+    await createTaskSafely(runtime, {
       name: 'INTEL_PARSE_TWEETS',
       description: 'Parse tweets',
       worldId,
+      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
       metadata: {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         updateInterval: 1000 * 60 * 60 * 24, // 24 hours
       },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
     });
   } else {
-    console.log(
-      'intel:tasks - plugins',
-      runtime.plugins.map((p) => p.name)
-    );
     logger.debug(
-      'WARNING: Twitter plugin not found, skipping creation of INTEL_SYNC_RAW_TWEETS task'
+      'WARNING: Twitter plugin not found, skipping INTEL_SYNC_RAW_TWEETS and INTEL_PARSE_TWEETS'
     );
   }
 
-  // enable trading stuff only if we need to
-  //const tradeService = runtime.getService(ServiceTypes.DEGEN_TRADING) as unknown; //  as ITradeService
-  // has to be included after degenTrader
-  const tradeService = runtime.getService('degen_trader') as unknown; //  as ITradeService
-  //if (plugins.indexOf('degenTrader') !== -1) {
-  if (tradeService) {
+  /* ------------------------- Trading signal tasks -------------------------- */
+
+  const hasTraderService = !!runtime.getService('degen_trader');
+
+  if (hasTraderService) {
+    // BUY
     runtime.registerTaskWorker({
       name: 'INTEL_GENERATE_BUY_SIGNAL',
-      validate: async (runtime, _message, _state) => {
-        // Check if we have some sentiment data before proceeding
-        const sentimentsData = (await runtime.getCache<Sentiment[]>('sentiments')) || [];
-        if (sentimentsData.length === 0) {
-          return false;
-        }
-        return true;
+      validate: async (rt) => {
+        const sentimentsData = (await rt.getCache<Sentiment[]>('sentiments')) || [];
+        return sentimentsData.length > 0;
       },
-      execute: async (runtime, _options, task) => {
-        const signal = new BuySignal(runtime);
+      execute: async (rt) => {
+        const signal = new BuySignal(rt);
         try {
           await signal.generateSignal();
-        } catch (error) {
-          logger.error('Failed to generate buy signal', error);
-          // Log the error but don't delete the task
+        } catch (err) {
+          logger.error('Failed to generate buy signal', err);
         }
       },
     });
 
-    runtime.createTask({
+    await createTaskSafely(runtime, {
       name: 'INTEL_GENERATE_BUY_SIGNAL',
       description: 'Generate a buy signal',
       worldId,
+      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
       metadata: {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         updateInterval: 1000 * 60 * 5, // 5 minutes
       },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
     });
 
+    // SELL
     runtime.registerTaskWorker({
       name: 'INTEL_GENERATE_SELL_SIGNAL',
-      validate: async (runtime, _message, _state) => {
-        // Check if we have some sentiment data before proceeding
-        const sentimentsData = (await runtime.getCache<Sentiment[]>('sentiments')) || [];
-        if (sentimentsData.length === 0) {
-          return false;
-        }
-        return true;
+      validate: async (rt) => {
+        const sentimentsData = (await rt.getCache<Sentiment[]>('sentiments')) || [];
+        return sentimentsData.length > 0;
       },
-      execute: async (runtime, _options, task) => {
-        const signal = new SellSignal(runtime);
+      execute: async (rt) => {
+        const signal = new SellSignal(rt);
         try {
           await signal.generateSignal();
-        } catch (error) {
-          logger.error('Failed to generate buy signal', error);
-          // Log the error but don't delete the task
+        } catch (err) {
+          logger.error('Failed to generate sell signal', err);
         }
       },
     });
 
-    runtime.createTask({
+    await createTaskSafely(runtime, {
       name: 'INTEL_GENERATE_SELL_SIGNAL',
       description: 'Generate a sell signal',
       worldId,
+      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
       metadata: {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         updateInterval: 1000 * 60 * 5, // 5 minutes
       },
-      tags: ['queue', 'repeat', 'degen_intel', 'immediate'],
     });
   } else {
-    logger.debug(
-      'WARNING: Trader service not found, skipping creation of INTEL_GENERATE_*_SIGNAL task'
-    );
+    logger.debug('WARNING: Trader service not found, skipping INTEL_GENERATE_*_SIGNAL tasks');
   }
 };
