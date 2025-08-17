@@ -10,6 +10,8 @@
   },
   "scripts": {
     "start": "elizaos dev",
+    "arb": "ts-node ./src/workers/fundingArb.ts",
+    "arb:build": "tsc -p tsconfig.json && node ./dist/workers/fundingArb.js",
     "build": "vite build && tsup",
     "lint": "prettier --write ./src",
     "dev": "elizaos dev",
