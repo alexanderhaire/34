@@ -1,105 +1,53 @@
 import type { IAgentRuntime, Memory, Provider, State } from '@elizaos/core';
-import type { IToken } from '../types';
-import { logger } from '@sentry/browser';
+import { logger } from '@elizaos/core';
 
 /**
- * Provider for Birdeye trending coins
+ * Provider for trending coins (using cached CoinMarketCap data).
  *
- * @typedef {import('./Provider').Provider} Provider
- * @typedef {import('./Runtime').IAgentRuntime} IAgentRuntime
- * @typedef {import('./Memory').Memory} Memory
- * @typedef {import('./State').State} State
- * @typedef {import('./Action').Action} Action
- *
- * @type {Provider}
- * @property {string} name - The name of the provider
- * @property {string} description - Description of the provider
- * @property {number} position - The position of the provider
- * @property {Function} get - Asynchronous function to get actions that validate for a given message
- *
- * @param {IAgentRuntime} runtime - The agent runtime
- * @param {Memory} message - The message memory
- * @param {State} state - The state of the agent
- * @returns {Object} Object containing data, values, and text related to actions
+ * This provider reads the `coinmarketcap_sync` cache populated by the
+ * CoinMarketCap plugin (if present) and returns a list of trending tokens.
+ * No Birdeye API calls are made.
  */
 export const birdeyeTrendingProvider: Provider = {
-  name: 'BIRDEYE_TRENDING_CRYPTOCURRENCY',
-  description: 'Birdeye trending cryptocurrencies',
+  name: 'TRENDING_CRYPTOCURRENCY',
+  description: 'Trending cryptocurrencies (CoinMarketCap)',
   dynamic: true,
-  //position: -1,
-  get: async (runtime: IAgentRuntime, message: Memory, state: State) => {
-    console.log('intel:provider - get birdeye');
-    // Get all sentiments
-    const chains = ['solana', 'base'];
-    const tokens = (await runtime.getCache<IToken[]>('tokens_solana')) || [];
-    //console.log('intel:provider - birdeye data', tokens)
+  get: async (
+    runtime: IAgentRuntime,
+    message: Memory,
+    state: State
+  ) => {
+    console.log('autofun:provider – get trending tokens');
+
+    // Fetch tokens from the CoinMarketCap cache instead of BirdEye.
+    const tokens = (await runtime.getCache('coinmarketcap_sync')) || [];
     if (!tokens.length) {
-      logger.warn('intel:provider - no birdeye token data found');
+      logger.warn('autofun:provider – no trending token data found');
       return false;
     }
 
-    //console.log('intel:provider - birdeye token data', tokens)
-    /*
-    name: "Bitcoin",
-    rank: 1,
-    chain: "L1",
-    price: 93768.60351119141,
-    symbol: "BTC",
-    address: "bitcoin",
-    logoURI: "https://s2.coinmarketcap.com/static/img/coins/128x128/1.png",
-    decimals: null,
-    provider: "coinmarketcap",
-    liquidity: null,
-    marketcap: 0,
-    last_updated: "2025-04-23T22:50:00.000Z",
-    volume24hUSD: 43588891208.92652,
-    price24hChangePercent: 1.17760374,
-*/
-
-    let latestTxt = '\nCurrent Birdeye Trending list:';
-    let idx = 1;
-    // maybe filter by active chains
-    const reduceTokens = tokens.map((t) => {
-      const obj = {
+    // Format a readable text block and reduce tokens to essential fields.
+    let latestTxt = '\nCurrent Trending list:';
+    const reduceTokens = tokens.map((t: any) => {
+      const obj: any = {
         name: t.name,
         rank: t.rank,
         chain: t.chain,
         priceUsd: t.price,
         symbol: t.symbol,
         address: t.address,
-        // skip logo, decimals
-        // liquidity/marketcap are optimal
-        // last_updated
         volume24hUSD: t.volume24hUSD,
         price24hChangePercent: t.price24hChangePercent,
       };
-      // optional fields
       if (t.liquidity !== null) obj.liquidity = t.liquidity;
       if (t.marketcap !== 0) obj.marketcap = t.marketcap;
       return obj;
     });
-    /*
-    for (const t of tokens) {
-      if (!sentiment?.occuringTokens?.length) continue;
-      sentiments += `ENTRY ${idx}\nTIME: ${sentiment.timeslot}\nTOKEN ANALYSIS:\n`;
-      for (const token of sentiment.occuringTokens) {
-        sentiments += `${token.token} - Sentiment: ${token.sentiment}\n${token.reason}\n`;
-      }
-      latestTxt += '\n-------------------\n';
-      idx++;
-    }
-    */
+
+    // Combine into final output.
     latestTxt += '\n' + JSON.stringify(reduceTokens) + '\n';
-
-    //console.log('intel:provider - cmc token text', latestTxt)
-
-    const data = {
-      tokens,
-    };
-
+    const data = { tokens };
     const values = {};
-
-    // Combine all text sections
     const text = latestTxt + '\n';
 
     return {
@@ -107,6 +55,5 @@ export const birdeyeTrendingProvider: Provider = {
       values,
       text,
     };
-    return false;
   },
 };

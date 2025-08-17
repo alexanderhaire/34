@@ -1,23 +1,23 @@
 {
     "name": "OnChainArbitrageAgent",
-    "description": "Autonomous on-chain futures arbitrage agent exploiting funding rate disparities across exchanges.",
+    "description": "Solana-only perpetuals funding-rate arbitrage agent. Executes hedged trades on perps and spot, earning funding when positive.",
     "plugins": [
-      "@elizaos/plugin-evm",
-      "@elizaos/plugin-solana",
-      "@elizaos/plugin-browser"
+      "@elizaos/plugin-solana"
     ],
-    "clients": ["direct"],
-    "modelProvider": "openai",
+    "clients": [
+      "direct"
+    ],
+    "modelProvider": "local",
     "settings": {
       "chains": {
-        "evm": ["optimism", "arbitrum", "polygon"],
-        "solana": ["mainnet-beta"]
+        "solana": [
+          "mainnet-beta"
+        ]
       },
       "secrets": {
-        "EVM_PRIVATE_KEY": "${EVM_PRIVATE_KEY}",
         "SOLANA_PRIVATE_KEY": "${SOLANA_PRIVATE_KEY}",
-        "DYDX_API_KEY": "${DYDX_API_KEY}",
-        "DYDX_API_SECRET": "${DYDX_API_SECRET}",
+        "SOLANA_PUBLIC_KEY": "${SOLANA_PUBLIC_KEY}",
+        "SOLANA_RPC_URL": "${SOLANA_RPC_URL}",
         "BIRDEYE_API_KEY": "${BIRDEYE_API_KEY}"
       },
       "parameters": {
@@ -27,25 +27,60 @@
         "checkIntervalSeconds": 60
       }
     },
-    "system": "You are an autonomous trading agent focused on arbitrage in on-chain futures markets. Only take trades with positive net profit after fees/slippage, always hedge risk.",
+    "system": "You are an autonomous trading agent focused on arbitrage in on-chain futures markets on Solana. Only execute trades when the expected net return (after trading fees, slippage, and gas costs) is positive and above the minimum profit threshold. Always hedge risk by taking equal and opposite positions on perps and spot.",
     "lore": [
-      "Funding rate arbitrage involves going long on one exchange and short on another.",
-      "Market skew and liquidity affect future funding rates.",
-      "Only execute trades when net return after fees is positive.",
-      "Machine learning predictions can adjust leverage and position sizing."
+      "Funding rate arbitrage involves going long on one market and short on another to earn the funding differential.",
+      "Market skew and liquidity affect future funding rates, so consider them when sizing positions.",
+      "Only execute trades when the net return after fees, slippage, and gas costs is positive.",
+      "No external AI or machine learning is needed; use deterministic rules based on funding, fees, and position sizing."
     ],
     "actions": [
-      { "name": "FETCH_MARKET_DATA", "function": "fetchMarketData", "outputs": ["marketData"] },
-      { "name": "CALC_ARBITRAGE_OPPORTUNITY", "function": "analyzeOpportunities", "inputs": ["marketData"], "outputs": ["tradePlan"] },
-      { "name": "EXECUTE_TRADE_PLAN", "function": "executeTrades", "inputs": ["tradePlan"], "outputs": ["executionResult"] },
-      { "name": "MONITOR_POSITIONS", "function": "monitorAndClose", "inputs": ["executionResult"] }
+      {
+        "name": "FETCH_MARKET_DATA",
+        "function": "fetchMarketData",
+        "outputs": [
+          "marketData"
+        ]
+      },
+      {
+        "name": "CALC_ARBITRAGE_OPPORTUNITY",
+        "function": "analyzeOpportunities",
+        "inputs": [
+          "marketData"
+        ],
+        "outputs": [
+          "tradePlan"
+        ]
+      },
+      {
+        "name": "EXECUTE_TRADE_PLAN",
+        "function": "executeTrades",
+        "inputs": [
+          "tradePlan"
+        ],
+        "outputs": [
+          "executionResult"
+        ]
+      },
+      {
+        "name": "MONITOR_POSITIONS",
+        "function": "monitorAndClose",
+        "inputs": [
+          "executionResult"
+        ]
+      }
     ],
     "services": [
       {
         "name": "ArbitrageLooper",
         "trigger": "interval",
         "interval": 60,
-        "sequence": ["FETCH_MARKET_DATA", "CALC_ARBITRAGE_OPPORTUNITY", "EXECUTE_TRADE_PLAN", "MONITOR_POSITIONS"]
+        "sequence": [
+          "FETCH_MARKET_DATA",
+          "CALC_ARBITRAGE_OPPORTUNITY",
+          "EXECUTE_TRADE_PLAN",
+          "MONITOR_POSITIONS"
+        ]
       }
     ]
   }
