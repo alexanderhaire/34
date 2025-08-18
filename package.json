@@ -14,7 +14,6 @@
     "arb:build": "tsc -p tsconfig.json && node ./dist/workers/fundingArb.js",
     "build": "vite build && tsup",
     "lint": "prettier --write ./src",
-    "arb": "bun ./src/workers/fundingArb.ts",
     "dev": "elizaos dev",
     "test": "elizaos test --port 3001",
     "clean": "rm -rf dist .turbo node_modules .turbo-tsconfig.json tsconfig.tsbuildinfo",
