@@ -1,5 +1,4 @@
-// /Users/alexanderhaire/spartan/src/index.ts
-
+// src/index.ts
 import fs from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
@@ -11,18 +10,13 @@ import type {
   ProjectAgent,
 } from "@elizaos/core";
 
-/* -------------------------------------------------------------
-   Local / project plugins
-------------------------------------------------------------- */
 import { communityInvestorPlugin } from "./plugins/communityInvestor";
 import { degenIntelPlugin } from "./plugins/degenIntel";
 import { degenTraderPlugin } from "./plugins/degenTrader";
 import { heliusPlugin } from "./plugins/helius";
 import { appPlugin } from "./plugins/plugin-app";
-import { telemetryPlugin } from "./plugins/telemetry"; // comment this out if you haven’t created it
-
-// ✅ NEW: Funding‑rate arbitrage plugin (actions + background service)
-import { fundingArbPlugin } from "./plugins/fundingArb";
+import { telemetryPlugin } from "./plugins/telemetry"; // optional
+import { initCharacter } from "./init"; // <— now imported from its own module
 
 /* -------------------------------------------------------------
    Load env from project root
@@ -54,11 +48,6 @@ const HAS_DISCORD =
 
 const HAS_TELEGRAM = !!process.env.INVESTMENT_MANAGER_TELEGRAM_BOT_TOKEN?.trim();
 
-// ✅ NEW: Only mount the funding‑arb plugin if Solana creds exist
-const HAS_FUNDING_ARB =
-  !!process.env.SOLANA_RPC_URL?.trim() &&
-  !!process.env.SOLANA_PRIVATE_KEY?.trim();
-
 /* -------------------------------------------------------------
    Character
 ------------------------------------------------------------- */
@@ -80,8 +69,6 @@ export const character: Character = {
 
     "@elizaos/plugin-bootstrap",
     "@elizaos/plugin-solana",
-
-    // Do NOT add @elizaos/plugin-local-ai
   ],
   settings: {
     GROQ_PLUGIN_LARGE:
@@ -91,7 +78,6 @@ export const character: Character = {
       process.env.GROQ_PLUGIN_SMALL ||
       "meta-llama/llama-4-scout-17b-16e-instruct",
 
-    // Everything services/plugins might read via runtime.getSetting(...)
     secrets: {
       /* LLM providers */
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -106,7 +92,7 @@ export const character: Character = {
 
       /* Market data */
       BIRDEYE_API_KEY: process.env.BIRDEYE_API_KEY,
-      HELIUS_API_KEY: process.env.HELIUS_API_KEY, // optional, but reduces warnings if present
+      HELIUS_API_KEY: process.env.HELIUS_API_KEY,
 
       /* Off-chain exchange (optional) */
       DYDX_API_KEY: process.env.DYDX_API_KEY,
@@ -122,16 +108,6 @@ export const character: Character = {
       TWITTER_PASSWORD: process.env.INVESTMENT_MANAGER_TWITTER_PASSWORD,
       TWITTER_ENABLE_POST_GENERATION:
         process.env.INVESTMENT_MANAGER_TWITTER_ENABLE_POST_GENERATION,
-
-      /* ✅ NEW (optional): expose strategy controls to runtime */
-      FRA_MARKETS: process.env.FRA_MARKETS,
-      FRA_MIN_APR: process.env.FRA_MIN_APR,
-      FRA_POLL_SECONDS: process.env.FRA_POLL_SECONDS,
-      FRA_PAPER: process.env.FRA_PAPER,
-      DRIFT_ENV: process.env.DRIFT_ENV,
-      DRIFT_SUBACCOUNT_ID: process.env.DRIFT_SUBACCOUNT_ID,
-      JUPITER_API_KEY: process.env.JUPITER_API_KEY,
-      PRIORITY_FEE_MICROLAMPORTS: process.env.PRIORITY_FEE_MICROLAMPORTS,
     },
     avatar,
   },
@@ -156,35 +132,12 @@ Spartan requires explicit confirmation for any action that moves funds.`,
   ],
   messageExamples: [
     [
-      {
-        name: "{{name1}}",
-        content: { text: "Can you create a new trading pool for our group?" },
-      },
-      {
-        name: "Spartan",
-        content: {
-          text:
-            "I'll help set up a shared wallet. How many co-owners and what's the initial allocation?",
-        },
-      },
+      { name: "{{name1}}", content: { text: "Can you create a new trading pool for our group?" } },
+      { name: "Spartan", content: { text: "I'll help set up a shared wallet. How many co-owners and what's the initial allocation?" } },
     ],
     [
       { name: "{{name1}}", content: { text: "What's the current price of BONK?" } },
-      {
-        name: "Spartan",
-        content: { text: "Current BONK: $0.00001234 | 24h: +5.6% | Vol: $1.2M | MC: $82M" },
-      },
-    ],
-    // ✅ (Optional) illustrate controlling the strategy via chat
-    [
-      { name: "{{name1}}", content: { text: "start funding arb" } },
-      {
-        name: "Spartan",
-        content: {
-          text:
-            "Acknowledged. Starting the funding‑rate arbitrage loop in PAPER mode with your current thresholds.",
-        },
-      },
+      { name: "Spartan", content: { text: "Current BONK: $0.00001234 | 24h: +5.6% | Vol: $1.2M | MC: $82M" } },
     ],
   ],
   postExamples: [],
@@ -227,25 +180,15 @@ const config: OnboardingConfig = { settings: {} };
 
 /* -------------------------------------------------------------
    Project agent
-   Keep intel last so its task registration runs after SQL is ready
 ------------------------------------------------------------- */
 export const spartan: ProjectAgent = {
   plugins: [
     appPlugin,
     heliusPlugin,
     communityInvestorPlugin,
-
-    // Trading services
-    degenTraderPlugin,
-
-    // ✅ NEW: Control start/stop/status of funding‑rate arbitrage loop
-    ...(HAS_FUNDING_ARB ? [fundingArbPlugin] : []),
-
-    // Registers tasks; needs SQL adapter ready
-    degenIntelPlugin,
-
-    // Optional: comment out if you don’t have it yet
-    telemetryPlugin,
+    degenTraderPlugin,   // trading services
+    degenIntelPlugin,    // registers tasks; needs SQL adapter ready
+    telemetryPlugin,     // optional
   ],
   character,
   init: async (runtime: IAgentRuntime) => {

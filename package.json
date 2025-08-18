@@ -10,8 +10,8 @@
   },
   "scripts": {
     "start": "elizaos dev",
-    "arb": "ts-node ./src/workers/fundingArb.ts",
-    "arb:build": "tsc -p tsconfig.json && node ./dist/workers/fundingArb.js",
+    "arb": "bun ./src/workers/fundingArb.ts",
+    "arb:build": "tsup src/workers/fundingArb.ts --format esm --target node18 --sourcemap --out-dir dist/workers && node ./dist/workers/fundingArb.js",
     "build": "vite build && tsup",
     "lint": "prettier --write ./src",
     "dev": "elizaos dev",
